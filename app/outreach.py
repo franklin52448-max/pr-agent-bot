@@ -1,86 +1,73 @@
 from __future__ import annotations
 
-from .models import JournalistProfile, OutreachRecommendation, OutreachRequest, OutreachResponse
-
-
-STOPWORDS = {
-    'the', 'and', 'for', 'with', 'from', 'into', 'that', 'this', 'your', 'their', 'about', 'into',
-    'pr', 'agent', 'zero', 'human', 'update', 'release', 'launch', 'feature', 'product'
-}
-
-
-def _keywords(text: str) -> set[str]:
-    tokens = {
-        token.strip('.,:;!?()[]{}"\'').lower()
-        for token in text.split()
-        if token.strip('.,:;!?()[]{}"\'').lower() not in STOPWORDS and len(token.strip('.,:;!?()[]{}"\'')) > 2
-    }
-    return tokens
-
-
-def _match_score(pr_terms: set[str], journalist: JournalistProfile) -> int:
-    beat_terms = {term.lower() for term in journalist.beat}
-    overlap = len(pr_terms & beat_terms)
-    score = int(round(journalist.relevance * 70 + overlap * 12))
-    if journalist.notes:
-        score += min(10, len(journalist.notes) // 50)
-    return max(0, min(100, score))
-
-
-def _angle(request: OutreachRequest, journalist: JournalistProfile) -> str:
-    pr = request.pr
-    beats = ', '.join(journalist.beat) if journalist.beat else 'product and tech'
-    if pr.release_notes:
-        return f"Lead with the release note: {pr.release_notes.strip()}"
-    if pr.audience:
-        return f"Focus on user impact for {', '.join(pr.audience[:3])}"
-    return f"Frame {pr.title} as a clear {beats} story with measurable utility."
+from .campaigns import build_preview, get_catalog, score_match
+from .models import JournalistProfile, OutreachRecommendation, OutreachRequest, OutreachResponse, MatchPreviewRequest, ProductRegistrationRequest
 
 
 def _subject(pr_title: str, journalist: JournalistProfile) -> str:
-    return f"Story idea: {pr_title}"
+    return f'Story idea: {pr_title} for {journalist.outlet}'
 
 
-def _body(request: OutreachRequest, journalist: JournalistProfile, angle: str) -> str:
+def _body(request: OutreachRequest, journalist: JournalistProfile, score: int) -> str:
     pr = request.pr
-    greeting = f"Hi {journalist.name},"
-    opening = {
-        'objective': 'Sharing a concise update that may fit your coverage.',
-        'insightful': 'Sharing a story angle that may be useful for your readers.',
-        'friendly': 'Thought this might be relevant for your beat.',
-    }[request.tone]
+    recent_topic = journalist.recent_coverage_topics[0] if journalist.recent_coverage_topics else 'a recent story'
     return (
-        f"{greeting}\n\n"
-        f"{opening}\n\n"
-        f"Title: {pr.title}\n"
-        f"Summary: {pr.summary}\n"
-        f"Angle: {angle}\n"
-        f"Relevant beats: {', '.join(journalist.beat) if journalist.beat else 'product, AI, and developer tools'}\n"
-        f"Outlet: {journalist.outlet}\n"
-        f"Contact: {journalist.email or 'available on request'}\n"
+        f'Hi {journalist.name},\n\n'
+        f'Your recent coverage of {recent_topic} suggests this could fit your beat.\n\n'
+        f'Title: {pr.title}\n'
+        f'Summary: {pr.summary}\n'
+        f'Beat: {", ".join(journalist.beat) if journalist.beat else "product and tech"}\n'
+        f'Relevance score: {score}/10\n\n'
+        f'If this is not a fit, please unsubscribe using the campaign-level unsubscribe flow.'
     )
 
 
 def build_outreach(request: OutreachRequest) -> OutreachResponse:
-    pr_terms = _keywords(f"{request.pr.title} {request.pr.summary} {' '.join(request.pr.labels)}")
+    journalists = request.journalists
+    if not journalists:
+        preview = build_preview(MatchPreviewRequest(product=ProductRegistrationRequest(
+            product_name=request.pr.title,
+            description=request.pr.summary,
+            key_differentiators=request.pr.labels[:3],
+            target_audience=request.pr.audience[:3],
+            news_hooks=request.pr.release_notes.split(';') if request.pr.release_notes else [],
+            budget_cap_usdc=0.0,
+            dry_run=True,
+        ), limit=10))
+        recommendations = [
+            OutreachRecommendation(
+                journalist=match.journalist,
+                score=match.relevance_score,
+                angle=f'Pitch the story around {match.journalist.recent_coverage_topics[0] if match.journalist.recent_coverage_topics else "their beat"}.',
+                subject=match.pitch_subject,
+                body=match.pitch_body,
+            )
+            for match in preview.matches
+        ]
+        summary = f'Ranked {len(recommendations)} journalists from the built-in catalog for {request.pr.title}.'
+        return OutreachResponse(top_pick=recommendations[0] if recommendations else None, recommendations=recommendations, summary=summary)
+
     recommendations: list[OutreachRecommendation] = []
-    for journalist in request.journalists:
-        score = _match_score(pr_terms, journalist)
-        angle = _angle(request, journalist)
+    for journalist in journalists:
+        score = max(1, min(10, int(round(score_match(ProductRegistrationRequest(
+            product_name=request.pr.title,
+            description=request.pr.summary,
+            key_differentiators=request.pr.labels[:3],
+            target_audience=request.pr.audience[:3],
+            news_hooks=request.pr.release_notes.split(';') if request.pr.release_notes else [],
+            budget_cap_usdc=0.0,
+            dry_run=True,
+        ), journalist)))))
         recommendations.append(
             OutreachRecommendation(
                 journalist=journalist,
                 score=score,
-                angle=angle,
+                angle=f'Frame {request.pr.title} as a useful story for {journalist.outlet}.',
                 subject=_subject(request.pr.title, journalist),
-                body=_body(request, journalist, angle),
+                body=_body(request, journalist, score),
             )
         )
 
     recommendations.sort(key=lambda item: item.score, reverse=True)
-    top_pick = recommendations[0] if recommendations else None
-    summary = (
-        f"Ranked {len(recommendations)} journalist profiles for {request.pr.title}."
-        + (f" Top match: {top_pick.journalist.name} ({top_pick.score}/100)." if top_pick else '')
-    )
-    return OutreachResponse(top_pick=top_pick, recommendations=recommendations, summary=summary)
+    summary = f'Ranked {len(recommendations)} journalist profiles for {request.pr.title}.'
+    return OutreachResponse(top_pick=recommendations[0] if recommendations else None, recommendations=recommendations, summary=summary)
