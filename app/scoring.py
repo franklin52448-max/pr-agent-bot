@@ -1,91 +1,109 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import asdict
+from datetime import datetime, timezone
+import re
+from typing import Iterable
 
-from .models import PREvaluationRequest, PREvaluationResponse
+from .models import ProductProfile
+from .seed import BEAT_PROFILES
+from .campaigns import JournalistRecord
 
-
-@dataclass(frozen=True)
-class ScoreWeights:
-    novelty: int = 18
-    user_impact: int = 18
-    technical_quality: int = 15
-    evidence_quality: int = 12
-    release_readiness: int = 12
-    communication_readiness: int = 10
-    risk: int = 15
+WORD_RE = re.compile(r"[a-z0-9]+")
 
 
-WEIGHTS = ScoreWeights()
+def _tokens(value: str | None) -> set[str]:
+    if not value:
+        return set()
+    return {token for token in WORD_RE.findall(value.lower()) if token}
 
 
-def _round_score(value: float) -> int:
-    return max(0, min(100, int(round(value))))
+def _normalize(values: Iterable[str]) -> set[str]:
+    output: set[str] = set()
+    for value in values:
+        output |= _tokens(value)
+    return output
 
 
-def score_pr(request: PREvaluationRequest) -> PREvaluationResponse:
-    signals = request.signals
-    weighted = (
-        signals.novelty * WEIGHTS.novelty
-        + signals.user_impact * WEIGHTS.user_impact
-        + signals.technical_quality * WEIGHTS.technical_quality
-        + signals.evidence_quality * WEIGHTS.evidence_quality
-        + signals.release_readiness * WEIGHTS.release_readiness
-        + signals.communication_readiness * WEIGHTS.communication_readiness
-        - signals.risk * WEIGHTS.risk
-    )
-    score = _round_score(weighted + 30)
+def score_journalist(product: ProductProfile, journalist: JournalistRecord) -> tuple[float, list[str]]:
+    score = 0.0
+    rationale: list[str] = []
 
-    reasons: list[str] = []
-    if signals.novelty >= 0.75:
-        reasons.append('novelty is strong')
-    if signals.user_impact >= 0.7:
-        reasons.append('user impact is compelling')
-    if signals.evidence_quality >= 0.7:
-        reasons.append('supporting evidence is ready for external sharing')
-    if signals.release_readiness < 0.4:
-        reasons.append('release readiness is low')
-    if signals.risk >= 0.6:
-        reasons.append('risk profile is elevated')
-    if request.human_review_required:
-        reasons.append('human review explicitly required')
-
-    if score >= 85 and not request.human_review_required:
-        decision = 'auto_approve'
-    elif score >= 70:
-        decision = 'human_review'
-    elif score >= 40:
-        decision = 'revise_and_resubmit'
-    else:
-        decision = 'reject'
-
-    outreach_recommended = score >= 80 and signals.communication_readiness >= 0.6 and signals.risk < 0.5
-    outreach_angle = None
-    if outreach_recommended:
-        outreach_angle = _build_outreach_angle(request)
-        reasons.append('journalist outreach is appropriate')
-
-    metadata = {
-        'weights': WEIGHTS.__dict__,
-        'labels': request.pr.labels,
-        'changed_files': request.pr.changed_files,
-        'merged_at': request.pr.merged_at.isoformat() if request.pr.merged_at else None,
-    }
-    return PREvaluationResponse(
-        score=score,
-        decision=decision,
-        reasons=reasons or ['no special flags raised'],
-        outreach_recommended=outreach_recommended,
-        outreach_angle=outreach_angle,
-        metadata=metadata,
+    product_terms = _normalize(
+        [
+            product.product_name,
+            product.company_name,
+            product.description,
+            product.category,
+            product.launch_angle or "",
+            *product.keywords,
+            *product.target_beats,
+            *product.target_regions,
+            *product.target_outlets,
+        ]
     )
 
+    journalist_terms = _normalize([
+        journalist.name,
+        journalist.outlet,
+        journalist.beat,
+        journalist.region,
+        *journalist.tags,
+    ])
 
-def _build_outreach_angle(request: PREvaluationRequest) -> str:
-    pr = request.pr
-    if pr.release_notes:
-        return f"Announce the update as a concrete product milestone: {pr.release_notes.strip()}"
-    if pr.audience:
-        audience = ', '.join(pr.audience[:3])
-        return f"Frame the story around the audience impact for {audience}."
-    return f"Position {pr.title} as a product and workflow improvement with clear user value."
+    shared = product_terms & journalist_terms
+    if shared:
+        score += min(35.0, 10.0 + len(shared) * 4.5)
+        rationale.append(f"shared terms: {', '.join(sorted(list(shared))[:5])}")
+
+    beat_profile = BEAT_PROFILES.get(journalist.beat, {})
+    beat_keywords = set(map(str.lower, beat_profile.get("keywords", [])))
+    beat_terms = product_terms & beat_keywords
+    if beat_terms:
+        score += min(30.0, 12.0 + len(beat_terms) * 5)
+        rationale.append(f"beat fit: {', '.join(sorted(list(beat_terms))[:5])}")
+
+    if product.category.lower() == journalist.beat.lower():
+        score += 20.0
+        rationale.append("direct category match")
+
+    if journalist.outlet in product.target_outlets:
+        score += 25.0
+        rationale.append("target outlet match")
+
+    if journalist.region in {region.lower() for region in product.target_regions}:
+        score += 12.0
+        rationale.append("target region match")
+
+    if journalist.seniority == "editor":
+        score += 4.0
+        rationale.append("editor-level contact")
+    elif journalist.seniority == "senior":
+        score += 2.0
+
+    days_since_update = max(0, (datetime.now(timezone.utc) - journalist.last_updated_at).days)
+    freshness_bonus = max(0.0, 8.0 - days_since_update * 0.35)
+    if freshness_bonus:
+        score += freshness_bonus
+        rationale.append(f"freshness bonus {freshness_bonus:.1f}")
+
+    if not rationale:
+        rationale.append("general products reporter fit")
+        score += 5.0
+
+    return round(min(score, 100.0), 2), rationale
+
+
+def rank_journalists(product: ProductProfile, journalists: Iterable[JournalistRecord], limit: int) -> list[dict[str, object]]:
+    ranked: list[dict[str, object]] = []
+    for journalist in journalists:
+        score, rationale = score_journalist(product, journalist)
+        ranked.append(
+            {
+                **asdict(journalist),
+                "score": score,
+                "rationale": rationale,
+            }
+        )
+    ranked.sort(key=lambda item: (item["score"], item["freshness_score"]), reverse=True)
+    return ranked[:limit]

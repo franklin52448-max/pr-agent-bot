@@ -1,35 +1,77 @@
-# Zero-human PR agent
+# pr-agent-bot
 
-BTNOMB idea_006: a FastAPI service that evaluates pull requests, decides when to auto-approve, when to escalate, and when to initiate journalist outreach.
+A FastAPI public-relations automation service that pitches products to journalists instead of evaluating pull requests.
 
 ## What it does
 
-- Scores pull requests with a deterministic rubric.
-- Produces an outreach brief for journalists when the PR is newsworthy.
-- Supports x402-style payment gating in USDC (ERC-20) for premium analysis routes.
-- Exposes a small API that can be embedded into internal tooling or a bot workflow.
+- Matches product launches to a mock database of roughly 2,000 journalists across AI, DeFi, fintech, cybersecurity, climate, consumer tech, health tech, and developer tools.
+- Sends actual outbound email via Resend, SendGrid, or SMTP when configured.
+- Supports dry-run mode so you can preview who would be contacted without sending.
+- Runs background workers for weekly journalist refreshes and 3-day follow-ups when no response is tracked.
+- Exposes REST endpoints for campaign registration, status, and match previews.
+- Includes x402 pricing at $0.50 USDC per pitch.
 
-## Stack
+## API
 
-- Python 3.11+
-- FastAPI
-- Pydantic
-- Uvicorn
-- Optional Web3 support for on-chain verification of USDC payments
+### POST /register
+Create a campaign from product details.
 
-## Environment
+Request body:
 
-Set these variables when running against a live chain/payment flow:
+```json
+{
+  "product": {
+    "product_name": "Acme AI Copilot",
+    "company_name": "Acme Labs",
+    "description": "A launch-ready AI assistant for enterprise workflows.",
+    "category": "ai",
+    "keywords": ["llm", "automation", "workflow"],
+    "target_beats": ["ai"],
+    "target_regions": ["north america"],
+    "target_outlets": ["Signal AI 1"],
+    "launch_angle": "new product launch",
+    "contact_name": "Franklin",
+    "contact_email": "franklin@example.com",
+    "website": "https://example.com",
+    "media_kit_url": "https://example.com/press",
+    "notes": "optional"
+  },
+  "dry_run": true,
+  "max_journalists": 12
+}
+```
 
-- `APP_NAME` – service name shown in responses
-- `ADMIN_EMAIL` – optional contact address
-- `X402_CHAIN_ID` – EVM chain id used for the payment flow
-- `X402_RPC_URL` – RPC endpoint used for transaction verification
-- `X402_TREASURY_ADDRESS` – receiving wallet address
-- `X402_USDC_CONTRACT` – USDC ERC-20 contract address for the chain
-- `X402_MIN_AMOUNT_USDC` – minimum USDC payment required for premium routes
-- `X402_REQUIRED_CONFIRMATIONS` – confirmation depth for settlement checks
-- `X402_PRICE_USDC` – default fee in USDC for premium actions
+### GET /status?campaign_id=...
+Returns campaign state, pitch delivery status, and follow-up state.
+
+### POST /match-preview
+Returns ranked journalist matches without creating a campaign.
+
+## Environment variables
+
+Email delivery:
+
+- `EMAIL_PROVIDER=resend|sendgrid|smtp`
+- `RESEND_API_KEY`
+- `SENDGRID_API_KEY`
+- `SMTP_HOST`
+- `SMTP_PORT`
+- `SMTP_USERNAME`
+- `SMTP_PASSWORD`
+- `SMTP_USE_TLS`
+- `SMTP_USE_SSL`
+- `OUTREACH_FROM_EMAIL`
+- `OUTREACH_FROM_NAME`
+- `ALLOW_CONSOLE_SENDER=true` for local dry-run console delivery
+
+Workers and pricing:
+
+- `X402_PRICE_USDC=0.50`
+- `DEFAULT_MATCH_LIMIT=12`
+- `FOLLOW_UP_AFTER_DAYS=3`
+- `WEEKLY_UPDATE_POLL_SECONDS=3600`
+- `FOLLOW_UP_POLL_SECONDS=60`
+- `DRY_RUN_DEFAULT=true`
 
 ## Run locally
 
@@ -38,58 +80,8 @@ pip install -r requirements.txt
 uvicorn app.main:app --reload
 ```
 
-## API
+## Notes
 
-### GET /health
-Basic liveness probe.
-
-### POST /v1/prs/evaluate
-Scores a pull request and returns a decision.
-
-### POST /v1/prs/brief
-Builds a journalist-facing pitch from the PR metadata.
-
-### POST /v1/outreach/journalists
-Ranks a journalist list against a PR and returns outreach recommendations.
-
-### POST /v1/payments/x402/quote
-Returns a USDC payment quote for premium analysis.
-
-### POST /v1/payments/x402/verify
-Verifies an x402 payment payload against the configured treasury and token settings.
-
-## Notes on x402 + USDC
-
-This repository includes a practical payment layer that expects a USDC ERC-20 transfer or authorization payload that can be validated against chain data. The app does not hard-code a single provider; instead, it accepts a signed payment envelope and verifies the token contract, recipient, amount, chain id, and settlement status before allowing premium execution.
-
-## Scoring rubric
-
-The PR score blends:
-
-- novelty
-- user impact
-- technical clarity
-- evidence quality
-- release readiness
-- communication readiness for external outreach
-- risk / compliance penalties
-
-The score maps to:
-
-- `0-39` → reject / needs work
-- `40-69` → improve and resubmit
-- `70-84` → good candidate for human review
-- `85-100` → strong autonomous candidate
-
-## Project layout
-
-- `app/main.py` – FastAPI app and routes
-- `app/config.py` – settings and pricing config
-- `app/models.py` – request/response schemas
-- `app/scoring.py` – deterministic score engine
-- `app/outreach.py` – journalist outreach generation and ranking
-- `app/payments.py` – x402 USDC payment verification and quotes
-
-## License
-
-MIT
+- The seed journalist database is synthetic and generated at startup.
+- x402 pricing is reflected in every match preview and registration response.
+- The service is built to pitch products to journalists, not to manage code review or pull requests.

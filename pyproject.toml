@@ -3,13 +3,12 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "zero-human-pr-agent"
-version = "1.0.0"
-description = "BTNOMB idea_006 Zero-human PR agent"
+name = "pr-agent-bot"
+version = "2.0.0"
+description = "Public relations outreach bot for pitching products to journalists"
 readme = "README.md"
 requires-python = ">=3.11"
 license = {text = "MIT"}
-
 authors = [{name = "Interaction Company of California"}]
 
 [tool.setuptools]
